@@ -9,6 +9,7 @@ import os
 import time
 from typing import Any
 import uuid
+import warnings
 
 from optuna._deprecated import deprecated_class
 from optuna.storages.journal._base import BaseJournalBackend
@@ -150,6 +151,15 @@ class JournalFileSymlinkLock(BaseJournalFileLock):
                 if err.errno == errno.EEXIST:
                     time.sleep(sleep_secs)
                     sleep_secs = min(sleep_secs * 2, 1)
+
+                    if sleep_secs > 10:
+                        warnings.warn(
+                            "Lock file creation is taking longer than expected. "
+                            "This may be due to an interrupted or improperly terminated process. "
+                            "If the issue persists, consider manually deleting the lock file and "
+                            "retrying."
+                        )
+
                     continue
                 raise err
             except BaseException:
@@ -203,6 +213,15 @@ class JournalFileOpenLock(BaseJournalFileLock):
                 if err.errno == errno.EEXIST:
                     time.sleep(sleep_secs)
                     sleep_secs = min(sleep_secs * 2, 1)
+
+                    if sleep_secs > 10:
+                        warnings.warn(
+                            "Lock file creation is taking longer than expected. "
+                            "This may be due to an interrupted or improperly terminated process. "
+                            "If the issue persists, consider manually deleting the lock file and "
+                            "retrying."
+                        )
+
                     continue
                 raise err
             except BaseException:
