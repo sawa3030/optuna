@@ -50,6 +50,7 @@ class InMemoryStorage(BaseStorage):
         self._trial_id_to_study_id_and_number: dict[int, tuple[int, int]] = {}
         self._study_name_to_id: dict[str, int] = {}
         self._studies: dict[int, _StudyInfo] = {}
+        self._waiting_trials: list[FrozenTrial] = []
 
         self._max_study_id = -1
         self._max_trial_id = -1
@@ -271,6 +272,12 @@ class InMemoryStorage(BaseStorage):
                 return False
 
             trial.state = state
+            if trial.state == TrialState.WAITING:
+                try:
+                    self._waiting_trials.remove(trial)
+                except ValueError:
+                    pass
+
             if values is not None:
                 trial.values = values
 
@@ -364,6 +371,8 @@ class InMemoryStorage(BaseStorage):
 
     def _set_trial(self, trial_id: int, trial: FrozenTrial) -> None:
         study_id, trial_number = self._trial_id_to_study_id_and_number[trial_id]
+        if trial.state == TrialState.WAITING:
+            self._waiting_trials.append(trial)
         self._studies[study_id].trials[trial_number] = trial
 
     def get_all_trials(
@@ -376,7 +385,9 @@ class InMemoryStorage(BaseStorage):
             self._check_study_id(study_id)
 
             trials = self._studies[study_id].trials
-            if states is not None:
+            if states is (TrialState.WAITING,):
+                trials = self._waiting_trials
+            elif states is not None:
                 trials = [t for t in trials if t.state in states]
 
             if deepcopy:
