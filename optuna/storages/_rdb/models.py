@@ -201,8 +201,8 @@ class TrialModel(BaseModel):
                         # {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
                         # value=TrialValueModel.value_type,
                         
-                        {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
-                        value=TrialValueModel.value_type.value,
+                        # {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
+                        # value=TrialValueModel.value_type.name,
                         
                         # {
                         #     TrialValueModel.TrialValueType.INF_NEG.name: -1,
@@ -212,18 +212,18 @@ class TrialModel(BaseModel):
                         # value=TrialValueModel.value_type,
 
                         
-                        # (
-                        #     TrialValueModel.value_type == TrialValueModel.TrialValueType.INF_NEG,
-                        #     -1,
-                        # ),
-                        # (
-                        #     TrialValueModel.value_type == TrialValueModel.TrialValueType.FINITE,
-                        #     0,
-                        # ),
-                        # (
-                        #     TrialValueModel.value_type == TrialValueModel.TrialValueType.INF_POS,
-                        #     1,
-                        # ),
+                        (
+                            TrialValueModel.value_type == TrialValueModel.TrialValueType.INF_NEG,
+                            -1,
+                        ),
+                        (
+                            TrialValueModel.value_type == TrialValueModel.TrialValueType.FINITE,
+                            0,
+                        ),
+                        (
+                            TrialValueModel.value_type == TrialValueModel.TrialValueType.INF_POS,
+                            1,
+                        ),
                     )
                 ),
                 desc(TrialValueModel.value),
@@ -247,8 +247,8 @@ class TrialModel(BaseModel):
             .order_by(
                 asc(
                     case(
-                        {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
-                        value=TrialValueModel.value_type.value,
+                        # {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
+                        # value=TrialValueModel.value_type.value,
                         
                         # {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
                         # value=TrialValueModel.value_type.name,
@@ -260,18 +260,18 @@ class TrialModel(BaseModel):
                         # },
                         # value=TrialValueModel.value_type,
                         
-                        # (
-                        #     TrialValueModel.value_type == TrialValueModel.TrialValueType.INF_NEG,
-                        #     -1,
-                        # ),
-                        # (
-                        #     TrialValueModel.value_type == TrialValueModel.TrialValueType.FINITE,
-                        #     0,
-                        # ),
-                        # (
-                        #     TrialValueModel.value_type == TrialValueModel.TrialValueType.INF_POS,
-                        #     1,
-                        # ),
+                        (
+                            TrialValueModel.value_type == TrialValueModel.TrialValueType.INF_NEG,
+                            -1,
+                        ),
+                        (
+                            TrialValueModel.value_type == TrialValueModel.TrialValueType.FINITE,
+                            0,
+                        ),
+                        (
+                            TrialValueModel.value_type == TrialValueModel.TrialValueType.INF_POS,
+                            1,
+                        ),
                     )
                 ),
                 asc(TrialValueModel.value),
