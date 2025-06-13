@@ -201,8 +201,15 @@ class TrialModel(BaseModel):
                         # {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
                         # value=TrialValueModel.value_type,
                         
-                        {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
-                        value=TrialValueModel.value_type.name,
+                        # {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
+                        # value=TrialValueModel.value_type.name,
+                        
+                        {
+                            TrialValueModel.TrialValueType.INF_NEG: -1,
+                            TrialValueModel.TrialValueType.FINITE: 0,
+                            TrialValueModel.TrialValueType.INF_POS: 1,
+                        },
+                        value=TrialValueModel.value_type,
 
                         
                         # (
@@ -243,8 +250,15 @@ class TrialModel(BaseModel):
                         # {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
                         # value=TrialValueModel.value_type,
                         
-                        {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
-                        value=TrialValueModel.value_type.name,
+                        # {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
+                        # value=TrialValueModel.value_type.name,
+                        
+                        {
+                            TrialValueModel.TrialValueType.INF_NEG: -1,
+                            TrialValueModel.TrialValueType.FINITE: 0,
+                            TrialValueModel.TrialValueType.INF_POS: 1,
+                        },
+                        value=TrialValueModel.value_type,
                         
                         # (
                         #     TrialValueModel.value_type == TrialValueModel.TrialValueType.INF_NEG,
