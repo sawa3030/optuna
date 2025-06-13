@@ -201,15 +201,15 @@ class TrialModel(BaseModel):
                         # {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
                         # value=TrialValueModel.value_type,
                         
-                        # {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
-                        # value=TrialValueModel.value_type.name,
+                        {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
+                        value=TrialValueModel.value_type.value,
                         
-                        {
-                            TrialValueModel.TrialValueType.INF_NEG.name: -1,
-                            TrialValueModel.TrialValueType.FINITE.name: 0,
-                            TrialValueModel.TrialValueType.INF_POS.name: 1,
-                        },
-                        value=TrialValueModel.value_type,
+                        # {
+                        #     TrialValueModel.TrialValueType.INF_NEG.name: -1,
+                        #     TrialValueModel.TrialValueType.FINITE.name: 0,
+                        #     TrialValueModel.TrialValueType.INF_POS.name: 1,
+                        # },
+                        # value=TrialValueModel.value_type,
 
                         
                         # (
@@ -247,18 +247,18 @@ class TrialModel(BaseModel):
             .order_by(
                 asc(
                     case(
-                        # {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
-                        # value=TrialValueModel.value_type,
+                        {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
+                        value=TrialValueModel.value_type.value,
                         
                         # {"INF_NEG": -1, "FINITE": 0, "INF_POS": 1},
                         # value=TrialValueModel.value_type.name,
                         
-                        {
-                            TrialValueModel.TrialValueType.INF_NEG.name: -1,
-                            TrialValueModel.TrialValueType.FINITE.name: 0,
-                            TrialValueModel.TrialValueType.INF_POS.name: 1,
-                        },
-                        value=TrialValueModel.value_type,
+                        # {
+                        #     TrialValueModel.TrialValueType.INF_NEG.name: -1,
+                        #     TrialValueModel.TrialValueType.FINITE.name: 0,
+                        #     TrialValueModel.TrialValueType.INF_POS.name: 1,
+                        # },
+                        # value=TrialValueModel.value_type,
                         
                         # (
                         #     TrialValueModel.value_type == TrialValueModel.TrialValueType.INF_NEG,
