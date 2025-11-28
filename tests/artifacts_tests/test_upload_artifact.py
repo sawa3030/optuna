@@ -133,6 +133,6 @@ def test_upload_artifact_with_positional_args(
         artifact_id = upload_artifact(
             trial,  # type: ignore
             file_path=file_path,
-            artifact_store=artifact_store, 
+            artifact_store=artifact_store,
         )
     _validate(artifact_id=artifact_id)
