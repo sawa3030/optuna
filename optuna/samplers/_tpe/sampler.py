@@ -8,6 +8,7 @@ import math
 from typing import Any
 from typing import cast
 from typing import TYPE_CHECKING
+import warnings
 
 import numpy as np
 
@@ -36,7 +37,6 @@ from optuna.study._multi_objective import _is_pareto_front
 from optuna.study._study_direction import StudyDirection
 from optuna.trial import FrozenTrial
 from optuna.trial import TrialState
-import warnings
 
 
 if TYPE_CHECKING:
