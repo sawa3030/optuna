@@ -17,7 +17,7 @@ from optuna.study import StudyDirection
 from optuna.study._multi_objective import _is_pareto_front
 from optuna.trial import FrozenTrial
 from optuna.trial import TrialState
-
+import warnings
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -180,6 +180,7 @@ class GPSampler(BaseSampler):
         deterministic_objective: bool = False,
         constraints_func: Callable[[FrozenTrial], Sequence[float]] | None = None,
         warn_independent_sampling: bool = True,
+        constant_liar: bool = False,
     ) -> None:
         self._rng = LazyRandomState(seed)
         self._independent_sampler = independent_sampler or optuna.samplers.RandomSampler(seed=seed)
@@ -194,6 +195,7 @@ class GPSampler(BaseSampler):
         self._deterministic = deterministic_objective
         self._constraints_func = constraints_func
         self._warn_independent_sampling = warn_independent_sampling
+        self._constant_liar = constant_liar
 
         if constraints_func is not None:
             warn_experimental_argument("constraints_func")
@@ -300,25 +302,43 @@ class GPSampler(BaseSampler):
         chosen_indices = self._rng.rng.choice(n_pareto_sols, size=size, replace=False)
         return pareto_params[chosen_indices]
 
+    def filter_trials(self, trials: list[FrozenTrial], search_space: dict[str, BaseDistribution]) -> list[FrozenTrial]:
+        filtered_trials = []
+        for trial in trials:
+            if search_space.keys() <= trial.params.keys():
+                filtered_trials.append(trial)
+        return filtered_trials
+
     def sample_relative(
         self, study: Study, trial: FrozenTrial, search_space: dict[str, BaseDistribution]
     ) -> dict[str, Any]:
         if search_space == {}:
             return {}
 
-        states = (TrialState.COMPLETE,)
+        states = (TrialState.COMPLETE, TrialState.RUNNING,) if self._constant_liar else (TrialState.COMPLETE,)
         trials = study._get_trials(deepcopy=False, states=states, use_cache=True)
 
-        if len(trials) < self._n_startup_trials:
+        completed_trials = [t for t in trials if t.state == TrialState.COMPLETE]
+        if len(completed_trials) < self._n_startup_trials:
             return {}
+        
+        if self._constant_liar:
+            trials = self.filter_trials(trials, search_space)
 
         internal_search_space = gp_search_space.SearchSpace(search_space)
         normalized_params = internal_search_space.get_normalized_params(trials)
 
         _sign = np.array([-1.0 if d == StudyDirection.MINIMIZE else 1.0 for d in study.directions])
-        standardized_score_vals, _, _ = _standardize_values(
-            _sign * np.array([trial.values for trial in trials])
-        )
+        n_obj = len(study.directions)
+        vals = _sign * np.array([
+            t.values if t.values is not None else [np.nan] * n_obj
+            for t in trials
+        ])
+        if self._constant_liar:
+            constant_liar_values = np.nanmax(vals, axis=0)
+            vals = np.where(np.isnan(vals), constant_liar_values, vals)
+
+        standardized_score_vals, _, _ = _standardize_values(vals)
 
         if (
             self._gprs_cache_list is not None
@@ -459,10 +479,24 @@ class GPSampler(BaseSampler):
 def _get_constraint_vals_and_feasibility(
     study: Study, trials: list[FrozenTrial]
 ) -> tuple[np.ndarray, np.ndarray]:
-    _constraint_vals = [
-        study._storage.get_trial_system_attrs(trial._trial_id).get(_CONSTRAINTS_KEY, ())
-        for trial in trials
+    raw_constraint_vals = [
+        study._storage.get_trial_system_attrs(t._trial_id).get(_CONSTRAINTS_KEY, ())
+        for t in trials
     ]
+
+    n_constraints = next((len(v) for v in raw_constraint_vals if len(v) > 0), 0)
+
+    _constraint_vals = np.full((len(raw_constraint_vals), n_constraints), np.nan, dtype=float)
+    for i, v in enumerate(raw_constraint_vals):
+        if len(v) == 0:
+            continue
+        if len(v) != n_constraints:
+            raise ValueError(f"Constraint dimension mismatch at trial {i}: {len(v)} != {n_constraints}")
+        _constraint_vals[i] = np.asarray(v, dtype=float)
+
+    col_max = np.nanmax(_constraint_vals, axis=0)
+    _constraint_vals = np.where(np.isnan(_constraint_vals), col_max, _constraint_vals)
+    
     if any(len(_constraint_vals[0]) != len(c) for c in _constraint_vals):
         raise ValueError("The number of constraints must be the same for all trials.")
 

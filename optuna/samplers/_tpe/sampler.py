@@ -36,6 +36,7 @@ from optuna.study._multi_objective import _is_pareto_front
 from optuna.study._study_direction import StudyDirection
 from optuna.trial import FrozenTrial
 from optuna.trial import TrialState
+import warnings
 
 
 if TYPE_CHECKING:
@@ -512,6 +513,7 @@ class TPESampler(BaseSampler):
         values: dict[str, list[float]] = {param_name: [] for param_name in search_space}
         for trial in trials:
             params = self._get_params(trial)
+            warnings.warn(str(params))
             if search_space.keys() <= params.keys():
                 for param_name, distribution in search_space.items():
                     param = params[param_name]
@@ -547,9 +549,13 @@ class TPESampler(BaseSampler):
         mpe_below = self._build_parzen_estimator(
             study, search_space, below_trials, handle_below=True
         )
+        below_trials_trial_ids = [trial._trial_id for trial in below_trials]
+        warnings.warn(str(below_trials_trial_ids))
         mpe_above = self._build_parzen_estimator(
             study, search_space, above_trials, handle_below=False
         )
+        above_trials_trial_ids = [trial._trial_id for trial in above_trials]
+        warnings.warn(str(above_trials_trial_ids))
 
         samples_below = mpe_below.sample(self._rng.rng, self._n_ei_candidates)
         acq_func_vals = self._compute_acquisition_func(samples_below, mpe_below, mpe_above)
@@ -568,6 +574,7 @@ class TPESampler(BaseSampler):
         handle_below: bool,
     ) -> _ParzenEstimator:
         observations = self._get_internal_repr(trials, search_space)
+        warnings.warn(str(observations))
         if handle_below and study._is_multi_objective():
             param_mask_below = [
                 search_space.keys() <= self._get_params(trial).keys() for trial in trials
