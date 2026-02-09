@@ -127,18 +127,20 @@ class LogEI(BaseAcquisitionFunc):
         self._stabilizing_noise = stabilizing_noise
         self._threshold = threshold
         if normalized_params_of_running_trials is not None:
-            if constant_liar_strategy == "worst":
-                constant_liar_value = self._gpr._y_train.min()
-            elif constant_liar_strategy == "best":
-                constant_liar_value = self._gpr._y_train.max()
-            elif constant_liar_strategy == "mean":
-                constant_liar_value = self._gpr._y_train.mean()
-            else:
-                assert False, "Should not reach here."
+            # if constant_liar_strategy == "worst":
+            #     constant_liar_value = self._gpr._y_train.min()
+            # elif constant_liar_strategy == "best":
+            #     constant_liar_value = self._gpr._y_train.max()
+            # elif constant_liar_strategy == "mean":
+            #     constant_liar_value = self._gpr._y_train.mean()
+            # else:
+            #     assert False, "Should not reach here."
 
-            constant_liar_y = constant_liar_value.expand(
-                normalized_params_of_running_trials.shape[0]
-            )
+            # constant_liar_y = constant_liar_value.expand(
+            #     normalized_params_of_running_trials.shape[0]
+            # )
+
+            constant_liar_y, _ = self._gpr.posterior(normalized_params_of_running_trials)
 
             self._gpr.add_data(
                 normalized_params_of_running_trials,
