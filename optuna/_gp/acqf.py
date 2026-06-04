@@ -47,6 +47,15 @@ def _logmeanexp(x: torch.Tensor, dim: int | tuple[int, ...]) -> torch.Tensor:
     return torch.special.logsumexp(x, dim=dim) - math.log(n)
 
 
+def _logdiffexp(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
+    # NOTE: We assume log_a >= log_b. If log_b is -inf, exp(log_b) is treated as zero.
+    return torch.where(
+        torch.isneginf(log_b),
+        log_a,
+        log_a + torch.log1p(-(log_b - log_a).exp()),
+    )
+
+
 def _fatplus(x: torch.Tensor, tau: float) -> torch.Tensor:
     tau_tensor = torch.tensor(tau, dtype=torch.float64)
     alpha = 1e-1
@@ -423,6 +432,121 @@ class LogEHVI(BaseAcquisitionFunc):
             non_dominated_box_lower_bounds=self._non_dominated_box_lower_bounds,
             non_dominated_box_intervals=self._non_dominated_box_intervals,
         )
+
+
+class qLogEHVI(BaseAcquisitionFunc):
+    def __init__(
+        self,
+        gpr_list: list[GPRegressor],
+        search_space: SearchSpace,
+        Y_train: torch.Tensor,
+        n_qmc_samples: int,
+        qmc_seed: int | None,
+        normalized_params_of_running_trials: np.ndarray,
+        stabilizing_noise: float = 1e-12,
+    ) -> None:
+        def _get_non_dominated_box_bounds() -> tuple[torch.Tensor, torch.Tensor]:
+            # NOTE(nabenabe): Y is to be maximized, loss_vals is to be minimized.
+            loss_vals = -Y_train.numpy()
+            pareto_sols = loss_vals[_is_pareto_front(loss_vals, assume_unique_lexsorted=False)]
+            ref_point = np.max(loss_vals, axis=0)
+            ref_point = np.nextafter(np.maximum(1.1 * ref_point, 0.9 * ref_point), np.inf)
+            lbs, ubs = get_non_dominated_box_bounds(pareto_sols, ref_point)
+            # NOTE(nabenabe): Flip back the sign to make them compatible with maximization.
+            return torch.from_numpy(-ubs), torch.from_numpy(-lbs)
+
+        self._stabilizing_noise = stabilizing_noise
+        self._gpr_list = gpr_list
+        self._x_running = torch.from_numpy(normalized_params_of_running_trials)
+        n_candidates = 1 + normalized_params_of_running_trials.shape[0]
+        self._fixed_samples = _sample_from_normal_sobol(
+            dim=n_candidates,
+            n_samples=n_qmc_samples,
+            seed=qmc_seed,
+        )
+        subset_indices = torch.arange(1, 1 << n_candidates, dtype=torch.int64)
+        bit_positions = torch.arange(n_candidates, dtype=torch.int64)
+        self._subset_mask = ((subset_indices[:, None] >> bit_positions) & 1).to(torch.bool)
+        self._subset_is_odd = (self._subset_mask.sum(dim=-1) % 2).to(torch.bool)
+        self._non_dominated_box_lower_bounds, non_dominated_box_upper_bounds = (
+            _get_non_dominated_box_bounds()
+        )
+        self._non_dominated_box_intervals = (
+            non_dominated_box_upper_bounds - self._non_dominated_box_lower_bounds
+        ).clamp_min_(_EPS)
+        # Chunking along subsets reduces peak memory in qLogEHVI while keeping tensor ops.
+        self._subset_chunk_size = 32
+        # Since all the objectives are equally important, we simply use the mean of
+        # inverse of squared mean lengthscales over all the objectives.
+        # inverse_squared_lengthscales is used in optim_mixed.py.
+        # cf. https://github.com/optuna/optuna/blob/v4.3.0/optuna/_gp/optim_mixed.py#L200-L209
+        super().__init__(np.mean([gpr.length_scales for gpr in gpr_list], axis=0), search_space)
+
+    def _get_posterior_samples(self, gpr: GPRegressor, x: torch.Tensor) -> torch.Tensor:
+        mean, cov = gpr.posterior(x, joint=True)
+        cov.diagonal(dim1=-2, dim2=-1).add_(self._stabilizing_noise)
+        return mean.unsqueeze(-2) + torch.einsum(
+            "sq,...qk->...sk", self._fixed_samples, torch.linalg.cholesky(cov).transpose(-1, -2)
+        )
+
+    def _get_joint_input(self, x: torch.Tensor) -> torch.Tensor:
+        running = self._x_running.expand(*x.shape[:-1], -1, -1)
+        return torch.cat([running, x.unsqueeze(-2)], dim=-2)
+
+    def _eval_log_qhvi_per_sample(self, Y_post: torch.Tensor) -> torch.Tensor:
+        # Y_post shape: (..., n_candidates, n_qmc_samples, n_objectives)
+        Y_post = Y_post.transpose(-3, -2)  # (..., n_qmc_samples, n_candidates, n_objectives)
+        box_lower_bounds = self._non_dominated_box_lower_bounds
+        box_upper_bounds = self._non_dominated_box_lower_bounds + self._non_dominated_box_intervals
+
+        # Accumulate positive/negative inclusion-exclusion terms chunk by chunk to avoid
+        # constructing very large tensors of shape (..., n_qmc, n_subsets, n_boxes, n_obj).
+        out_shape = Y_post.shape[:-2]
+        log_positive_terms = torch.full(out_shape, -torch.inf, dtype=Y_post.dtype)
+        log_negative_terms = torch.full_like(log_positive_terms, -torch.inf)
+        n_subsets = self._subset_mask.shape[0]
+        for start in range(0, n_subsets, self._subset_chunk_size):
+            end = min(start + self._subset_chunk_size, n_subsets)
+            chunk_mask = self._subset_mask[start:end]
+            chunk_subset_is_odd = self._subset_is_odd[start:end]
+            chunk_mask_view = chunk_mask.view(
+                *([1] * (Y_post.ndim - 3)),
+                1,
+                chunk_mask.shape[0],
+                chunk_mask.shape[1],
+                1,
+            )
+
+            # (..., n_qmc_samples, chunk_subsets, n_candidates, n_objectives)
+            Y_post_by_subset = Y_post.unsqueeze(-3).masked_fill(~chunk_mask_view, float("inf"))
+            # (..., n_qmc_samples, chunk_subsets, n_objectives)
+            subset_mins = Y_post_by_subset.amin(dim=-2)
+            # (..., n_qmc_samples, chunk_subsets, n_boxes, n_objectives)
+            clipped_mins = torch.minimum(subset_mins.unsqueeze(-2), box_upper_bounds)
+            log_lengths = _log_fatplus(clipped_mins - box_lower_bounds, tau=1e-6)
+            # (..., n_qmc_samples, chunk_subsets, n_boxes)
+            log_subset_box_terms = log_lengths.sum(dim=-1)
+
+            if torch.any(chunk_subset_is_odd):
+                chunk_log_positive = torch.special.logsumexp(
+                    log_subset_box_terms[..., chunk_subset_is_odd, :], dim=(-1, -2)
+                )
+                log_positive_terms = torch.logaddexp(log_positive_terms, chunk_log_positive)
+            if torch.any(~chunk_subset_is_odd):
+                chunk_log_negative = torch.special.logsumexp(
+                    log_subset_box_terms[..., ~chunk_subset_is_odd, :], dim=(-1, -2)
+                )
+                log_negative_terms = torch.logaddexp(log_negative_terms, chunk_log_negative)
+
+        return _logdiffexp(log_positive_terms, log_negative_terms)
+
+    def eval_acqf(self, x: torch.Tensor) -> torch.Tensor:
+        joint_x = self._get_joint_input(x)
+        Y_post = [
+            self._get_posterior_samples(gpr, joint_x).transpose(-2, -1) for gpr in self._gpr_list
+        ]
+        log_hvi_per_sample = self._eval_log_qhvi_per_sample(torch.stack(Y_post, dim=-1))
+        return _logmeanexp(log_hvi_per_sample, dim=-1)
 
 
 class ConstrainedLogEHVI(BaseAcquisitionFunc):
