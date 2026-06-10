@@ -80,9 +80,14 @@ class GPSampler(BaseSampler):
     As an acquisition function, we use:
 
     - log expected improvement (logEI) for single-objective optimization,
-    - log expected hypervolume improvement (logEHVI) for Multi-objective optimization, and
+    - log expected hypervolume improvement (logEHVI) for Multi-objective optimization,
     - the summation of logEI and the logarithm of the feasible probability with the independent
-      assumption of each constraint for (black-box inequality) constrained optimization.
+      assumption of each constraint for (black-box inequality) constrained optimization, and
+    - MC-based batch log expected improvement (qLogEI) for single-objective optimization with
+      running trials.
+
+    Note that We adopt a sequential greedy selection for batch candidates instead of joint
+    optimization.
 
     For further information about these acquisition functions, please refer to the following
     papers:
@@ -217,6 +222,7 @@ class GPSampler(BaseSampler):
         # NOTE(nabenabe): ehvi in BoTorchSampler uses 20.
         self._n_local_search = 10
         self._tol = 1e-4
+        self._ehvi_n_qmc_samples = 128  # NOTE(nabenabe): The BoTorch default value.
         self._q_acqf_n_qmc_samples = 512  # NOTE(nabenabe): The BoTorch default value.
 
     def _log_independent_sampling(self, trial: FrozenTrial, param_name: str) -> None:
@@ -361,10 +367,6 @@ class GPSampler(BaseSampler):
     ) -> dict[str, Any]:
         internal_search_space = gp_search_space.SearchSpace(search_space)
         normalized_params = internal_search_space.get_normalized_params(completed_trials)
-
-        # We adopt a sequential greedy selection for batch candidates instead of joint
-        # optimization. For a detailed discussion of this sequential greedy approach, see:
-        # https://arxiv.org/pdf/2310.20708
         normalized_params_of_running_trials = (
             internal_search_space.get_normalized_params(
                 running_trials, [_get_params(t) for t in running_trials]
@@ -431,7 +433,7 @@ class GPSampler(BaseSampler):
                         gpr_list=gprs_list,
                         search_space=internal_search_space,
                         Y_train=torch.from_numpy(standardized_score_vals),
-                        n_qmc_samples=128,  # NOTE(nabenabe): The BoTorch default value.
+                        n_qmc_samples=self._ehvi_n_qmc_samples,
                         qmc_seed=self._rng.rng.randint(1 << 30),
                         normalized_params_of_running_trials=None,
                     )

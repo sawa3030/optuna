@@ -216,6 +216,7 @@ class qLogEI(BaseAcquisitionFunc):
         self._threshold = threshold
         self._x_running = torch.from_numpy(normalized_params_of_running_trials)
         self._fixed_samples = _sample_from_normal_sobol(
+            # NOTE(nabe): The number of pending points + the new point, so +1.
             dim=1 + normalized_params_of_running_trials.shape[0],
             n_samples=n_qmc_samples,
             seed=qmc_seed,
@@ -225,22 +226,30 @@ class qLogEI(BaseAcquisitionFunc):
     def _get_posterior_samples(self, x: torch.Tensor) -> torch.Tensor:
         mean, cov = self._gpr.posterior(x, joint=True)
         cov.diagonal(dim1=-2, dim2=-1).add_(self._stabilizing_noise)
-        return mean.unsqueeze(-2) + torch.einsum(
-            "sq,...qk->...sk", self._fixed_samples, torch.linalg.cholesky(cov).transpose(-1, -2)
+        # mean.shape: (q + 1,), cov.shape: (q + 1, q + 1), fixed_samples.shape: (128, q + 1).
+        return mean.unsqueeze(-2) + torch.matmul(
+            self._fixed_samples, torch.linalg.cholesky(cov).transpose(-1, -2)
         )
 
     def _get_joint_input(self, x: torch.Tensor) -> torch.Tensor:
-        running = self._x_running.expand(*x.shape[:-1], -1, -1)
-        return torch.cat([running, x.unsqueeze(-2)], dim=-2)
+        if x.ndim == 1:
+            return torch.cat([self._x_running, x.unsqueeze(0)], dim=0)
+        if x.ndim == 2:
+            running = self._x_running.unsqueeze(0).expand(x.shape[0], -1, -1)
+            return torch.cat([running, x.unsqueeze(-2)], dim=-2)
+        raise ValueError(f"Does not expect x.ndim = {x.ndim}.")
 
     def eval_acqf(self, x: torch.Tensor) -> torch.Tensor:
         if np.isneginf(self._threshold):
             return torch.zeros(x.shape[:-1], dtype=torch.float64)
 
+        # NOTE(nabenabe): See Eq. (10) of https://arxiv.org/pdf/2310.20708
         joint_x = self._get_joint_input(x)
         y_post = self._get_posterior_samples(joint_x)
         log_improvement = _log_fatplus(y_post - self._threshold, tau=1e-6)
+        # Take the fat max operation along the running candidates direction (the Q-axis).
         smooth_max_log_improvement = _fatmax(log_improvement, dim=-1, tau=1e-2)
+        # Take the mean over the fixed sample direction (the s-axis).
         acqf_value = _logmeanexp(smooth_max_log_improvement, dim=-1)
         return acqf_value
 
@@ -333,6 +342,8 @@ class ConstrainedLogEI(BaseAcquisitionFunc):
         assert (
             len(constraints_gpr_list) == len(constraints_threshold_list) and constraints_gpr_list
         )
+        # TODO(sawa3030): Remove constant liar strategy once we implement Monte-Carlo based
+        # approaches for handling running trials in constrained optimization.
         self._acqf = LogEI(
             gpr, search_space, threshold, normalized_params_of_running_trials, stabilizing_noise
         )
