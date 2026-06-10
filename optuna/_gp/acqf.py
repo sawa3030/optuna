@@ -356,6 +356,57 @@ class ConstrainedLogEI(BaseAcquisitionFunc):
         )
 
 
+class qConstrainedLogEI(BaseAcquisitionFunc):
+    def __init__(
+        self,
+        gpr: GPRegressor,
+        search_space: SearchSpace,
+        threshold: float,
+        n_qmc_samples: int,
+        qmc_seed: int | None,
+        constraints_gpr_list: list[GPRegressor],
+        constraints_threshold_list: list[float],
+        normalized_params_of_running_trials: np.ndarray,
+        stabilizing_noise: float = 1e-12,
+    ) -> None:
+        self._threshold = threshold
+        assert (
+            len(constraints_gpr_list) == len(constraints_threshold_list) and constraints_gpr_list
+        )
+        self._acqf = qLogEI(
+            gpr=gpr,
+            search_space=search_space,
+            threshold=threshold,
+            n_qmc_samples=n_qmc_samples,
+            qmc_seed=qmc_seed,
+            normalized_params_of_running_trials=normalized_params_of_running_trials,
+            stabilizing_noise=stabilizing_noise,
+        )
+        self._constraints_acqf_list = [
+            LogPI(
+                _gpr,
+                search_space,
+                _threshold,
+                normalized_params_of_running_trials,
+                stabilizing_noise,
+            )
+            for _gpr, _threshold in zip(constraints_gpr_list, constraints_threshold_list)
+        ]
+        super().__init__(gpr.length_scales, search_space)
+
+    def eval_acqf(self, x: torch.Tensor) -> torch.Tensor:
+        if np.isneginf(self._threshold):
+            return sum(acqf.eval_acqf(x) for acqf in self._constraints_acqf_list)
+
+        joint_x = self._acqf._get_joint_input(x)
+        y_post = self._acqf._get_posterior_samples(joint_x)
+        log_improvement = _log_fatplus(y_post - self._threshold, tau=1e-6)
+        constraints_values = sum(acqf.eval_acqf(joint_x) for acqf in self._constraints_acqf_list)
+        constrained_log_improvement = log_improvement + constraints_values.unsqueeze(-2)
+        smooth_max_log_improvement = _fatmax(constrained_log_improvement, dim=-1, tau=1e-2)
+        return _logmeanexp(smooth_max_log_improvement, dim=-1)
+
+
 class LogEHVI(BaseAcquisitionFunc):
     def __init__(
         self,
