@@ -84,7 +84,9 @@ class GPSampler(BaseSampler):
     - the summation of logEI and the logarithm of the feasible probability with the independent
       assumption of each constraint for (black-box inequality) constrained optimization, and
     - MC-based batch log expected improvement (qLogEI) for single-objective optimization with
-      running trials.
+      running trials, and
+    - MC-based batch log expected hypervolume improvement (qLogEHVI) for multi-objective
+      optimization with running trials.
 
     Note that We adopt a sequential greedy selection for batch candidates instead of joint
     optimization.
@@ -429,14 +431,24 @@ class GPSampler(BaseSampler):
                     )
                 best_params = normalized_params[np.argmax(standardized_score_vals), np.newaxis]
             else:
-                acqf = acqf_module.LogEHVI(
-                    gpr_list=gprs_list,
-                    search_space=internal_search_space,
-                    Y_train=torch.from_numpy(standardized_score_vals),
-                    n_qmc_samples=self._ehvi_n_qmc_samples,
-                    qmc_seed=self._rng.rng.randint(1 << 30),
-                    normalized_params_of_running_trials=normalized_params_of_running_trials,
-                )
+                if normalized_params_of_running_trials is None:
+                    acqf = acqf_module.LogEHVI(
+                        gpr_list=gprs_list,
+                        search_space=internal_search_space,
+                        Y_train=torch.from_numpy(standardized_score_vals),
+                        n_qmc_samples=self._ehvi_n_qmc_samples,
+                        qmc_seed=self._rng.rng.randint(1 << 30),
+                        normalized_params_of_running_trials=None,
+                    )
+                else:
+                    acqf = acqf_module.qLogEHVI(
+                        gpr_list=gprs_list,
+                        search_space=internal_search_space,
+                        Y_train=torch.from_numpy(standardized_score_vals),
+                        n_qmc_samples=self._ehvi_n_qmc_samples,
+                        qmc_seed=self._rng.rng.randint(1 << 30),
+                        normalized_params_of_running_trials=normalized_params_of_running_trials,
+                    )
                 best_params = self._get_best_params_for_multi_objective(
                     normalized_params, standardized_score_vals
                 )

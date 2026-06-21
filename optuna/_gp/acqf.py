@@ -47,6 +47,19 @@ def _logmeanexp(x: torch.Tensor, dim: int | tuple[int, ...]) -> torch.Tensor:
     return torch.special.logsumexp(x, dim=dim) - math.log(n)
 
 
+def _get_non_dominated_box_bounds(
+    Y_train: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # NOTE(nabenabe): Y is to be maximized, loss_vals is to be minimized.
+    loss_vals = -Y_train.numpy()
+    pareto_sols = loss_vals[_is_pareto_front(loss_vals, assume_unique_lexsorted=False)]
+    ref_point = np.max(loss_vals, axis=0)
+    ref_point = np.nextafter(np.maximum(1.1 * ref_point, 0.9 * ref_point), np.inf)
+    lbs, ubs = get_non_dominated_box_bounds(pareto_sols, ref_point)
+    # NOTE(nabenabe): Flip back the sign to make them compatible with maximization.
+    return torch.from_numpy(-ubs), torch.from_numpy(-lbs)
+
+
 def logehvi(
     Y_post: torch.Tensor,  # (..., n_qmc_samples, n_objectives)
     non_dominated_box_lower_bounds: torch.Tensor,  # (n_boxes, n_objectives)
@@ -345,16 +358,6 @@ class LogEHVI(BaseAcquisitionFunc):
         normalized_params_of_running_trials: np.ndarray | None = None,
         stabilizing_noise: float = 1e-12,
     ) -> None:
-        def _get_non_dominated_box_bounds() -> tuple[torch.Tensor, torch.Tensor]:
-            # NOTE(nabenabe): Y is to be maximized, loss_vals is to be minimized.
-            loss_vals = -Y_train.numpy()
-            pareto_sols = loss_vals[_is_pareto_front(loss_vals, assume_unique_lexsorted=False)]
-            ref_point = np.max(loss_vals, axis=0)
-            ref_point = np.nextafter(np.maximum(1.1 * ref_point, 0.9 * ref_point), np.inf)
-            lbs, ubs = get_non_dominated_box_bounds(pareto_sols, ref_point)
-            # NOTE(nabenabe): Flip back the sign to make them compatible with maximization.
-            return torch.from_numpy(-ubs), torch.from_numpy(-lbs)
-
         self._stabilizing_noise = stabilizing_noise
         self._gpr_list = gpr_list
         if normalized_params_of_running_trials is not None:
@@ -380,7 +383,7 @@ class LogEHVI(BaseAcquisitionFunc):
             dim=Y_train.shape[-1], n_samples=n_qmc_samples, seed=qmc_seed
         )
         self._non_dominated_box_lower_bounds, non_dominated_box_upper_bounds = (
-            _get_non_dominated_box_bounds()
+            _get_non_dominated_box_bounds(Y_train)
         )
         self._non_dominated_box_intervals = (
             non_dominated_box_upper_bounds - self._non_dominated_box_lower_bounds
@@ -412,6 +415,79 @@ class LogEHVI(BaseAcquisitionFunc):
         )
 
 
+class qLogEHVI(BaseAcquisitionFunc):
+    def __init__(
+        self,
+        gpr_list: list[GPRegressor],
+        search_space: SearchSpace,
+        Y_train: torch.Tensor,
+        n_qmc_samples: int,
+        qmc_seed: int | None,
+        normalized_params_of_running_trials: np.ndarray,
+        stabilizing_noise: float = 1e-12,
+    ) -> None:
+        self._stabilizing_noise = stabilizing_noise
+        self._gpr_list = gpr_list
+        self._Y_train = Y_train
+        self._x_running = torch.from_numpy(normalized_params_of_running_trials)
+        self._fixed_samples = _sample_from_normal_sobol(
+            dim=Y_train.shape[-1],
+            n_samples=n_qmc_samples,
+            seed=qmc_seed,
+        )
+
+        self._sampled_running_vals = []
+        for i, gpr in enumerate(self._gpr_list):
+            mean, var = gpr.posterior(self._x_running)
+            stdev = torch.sqrt(var + self._stabilizing_noise)
+            self._sampled_running_vals.append(
+                mean[..., None] + stdev[..., None] * self._fixed_samples[..., i]
+            )
+
+        self._non_dominated_box_lower_bounds_list = []
+        self._non_dominated_box_intervals_list = []
+        n_qmc_samples = self._fixed_samples.shape[0]
+        running_vals = torch.stack(self._sampled_running_vals, dim=-1)
+        for i in range(n_qmc_samples):
+            Y_augmented = torch.cat([self._Y_train, running_vals[:, i, :]], dim=0)
+            box_lower_bounds, box_upper_bounds = _get_non_dominated_box_bounds(Y_augmented)
+            self._non_dominated_box_lower_bounds_list.append(box_lower_bounds)
+            self._non_dominated_box_intervals_list.append(
+                (box_upper_bounds - box_lower_bounds).clamp_min_(_EPS)
+            )
+
+        # Since all the objectives are equally important, we simply use the mean of
+        # inverse of squared mean lengthscales over all the objectives.
+        # inverse_squared_lengthscales is used in optim_mixed.py.
+        # cf. https://github.com/optuna/optuna/blob/v4.3.0/optuna/_gp/optim_mixed.py#L200-L209
+        super().__init__(np.mean([gpr.length_scales for gpr in gpr_list], axis=0), search_space)
+
+    def eval_acqf(self, x: torch.Tensor) -> torch.Tensor:
+        Y_post = []
+        for i, gpr in enumerate(self._gpr_list):
+            mean, var = gpr.posterior(x)
+            stdev = torch.sqrt(var + self._stabilizing_noise)
+            Y_post.append(mean[..., None] + stdev[..., None] * self._fixed_samples[..., i])
+
+        Y_post_stacked = torch.stack(Y_post, dim=-1)
+        log_hvi = []
+        for i, (box_lower_bounds, box_intervals) in enumerate(
+            zip(
+                self._non_dominated_box_lower_bounds_list,
+                self._non_dominated_box_intervals_list,
+            )
+        ):
+            log_hvi.append(
+                logehvi(
+                    Y_post=Y_post_stacked[..., i : i + 1, :],
+                    non_dominated_box_lower_bounds=box_lower_bounds,
+                    non_dominated_box_intervals=box_intervals,
+                )
+            )
+
+        return _logmeanexp(torch.stack(log_hvi, dim=-1), dim=-1)
+
+
 class ConstrainedLogEHVI(BaseAcquisitionFunc):
     def __init__(
         self,
@@ -429,14 +505,26 @@ class ConstrainedLogEHVI(BaseAcquisitionFunc):
             len(constraints_gpr_list) == len(constraints_threshold_list) and constraints_gpr_list
         )
         self._acqf = (
-            LogEHVI(
-                gpr_list,
-                search_space,
-                Y_feasible,
-                n_qmc_samples,
-                qmc_seed,
-                normalized_params_of_running_trials,
-                stabilizing_noise,
+            (
+                LogEHVI(
+                    gpr_list,
+                    search_space,
+                    Y_feasible,
+                    n_qmc_samples,
+                    qmc_seed,
+                    normalized_params_of_running_trials,
+                    stabilizing_noise,
+                )
+                if normalized_params_of_running_trials is None
+                else qLogEHVI(
+                    gpr_list,
+                    search_space,
+                    Y_feasible,
+                    n_qmc_samples,
+                    qmc_seed,
+                    normalized_params_of_running_trials,
+                    stabilizing_noise,
+                )
             )
             if Y_feasible is not None
             else None
