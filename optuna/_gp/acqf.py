@@ -172,6 +172,14 @@ class qLogEI(BaseAcquisitionFunc):
         )
         super().__init__(gpr.length_scales, search_space)
 
+    def _fatplus(self, x: torch.Tensor, tau: float) -> torch.Tensor:
+        tau_tensor = torch.tensor(tau, dtype=torch.float64)
+        alpha = 1e-1
+        scaled_x = x / tau_tensor
+        return tau_tensor * (
+            torch.nn.functional.softplus(scaled_x, beta=1.0) + alpha / (1.0 + scaled_x.square())
+        )
+
     def eval_acqf(self, x: torch.Tensor) -> torch.Tensor:
         if np.isneginf(self._threshold):
             return torch.zeros(x.shape[:-1], dtype=torch.float64)
@@ -179,6 +187,11 @@ class qLogEI(BaseAcquisitionFunc):
         # NOTE(nabenabe): See Eq. (10) of https://arxiv.org/pdf/2310.20708
         y_post = self._cond_gpr.sample_joint_posterior(x)
         log_improvement = (y_post - self._threshold).clamp_min_(_EPS).log()
+        # use softplus
+        # log_improvement = torch.nn.functional.softplus(y_post - self._threshold, beta=1.0).log()
+        # use fatplus
+        # log_improvement = self._fatplus(y_post - self._threshold, tau=1e-6).log()
+
         # Take the max operation along the running candidates direction (the Q-axis).
         # TODO(sawa3030): Consider using fatmax instead of max.
         max_log_improvement_in_q_batch = torch.amax(log_improvement, dim=-1)
