@@ -42,6 +42,19 @@ def _sample_from_normal_sobol(dim: int, n_samples: int, seed: int | None) -> tor
     return torch.erfinv(samples) * float(np.sqrt(2))
 
 
+def _get_non_dominated_box_bounds_for_maximization(
+    Y_train: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # NOTE(nabenabe): Y is to be maximized, loss_vals is to be minimized.
+    loss_vals = -Y_train.numpy()
+    pareto_sols = loss_vals[_is_pareto_front(loss_vals, assume_unique_lexsorted=False)]
+    ref_point = np.max(loss_vals, axis=0)
+    ref_point = np.nextafter(np.maximum(1.1 * ref_point, 0.9 * ref_point), np.inf)
+    lbs, ubs = get_non_dominated_box_bounds(pareto_sols, ref_point)
+    # NOTE(nabenabe): Flip back the sign to make them compatible with maximization.
+    return torch.from_numpy(-ubs), torch.from_numpy(-lbs)
+
+
 def logehvi(
     Y_post: torch.Tensor,  # (..., n_qmc_samples, n_objectives)
     non_dominated_box_lower_bounds: torch.Tensor,  # (n_boxes, n_objectives)
@@ -60,6 +73,29 @@ def logehvi(
     # NOTE(nabenabe): logsumexp with dim=-1 is for the HVI calculation and that with dim=-2 is for
     # expectation of the HVIs over the fixed_samples.
     return torch.special.logsumexp(diff.log().sum(dim=-1), dim=(-2, -1)) - log_n_qmc_samples
+
+
+def qlogehvi(
+    Y_post: torch.Tensor,  # (..., n_qmc_samples, q, n_objectives)
+    non_dominated_box_lower_bounds: torch.Tensor,  # (n_boxes, n_objectives)
+    non_dominated_box_intervals: torch.Tensor,  # (n_boxes, n_objectives)
+) -> torch.Tensor:  # (..., )
+    log_n_qmc_samples = float(np.log(Y_post.shape[-3]))
+    q = Y_post.shape[-2]
+    total = torch.full(Y_post.shape[:-3], -torch.inf, dtype=torch.float64)
+
+    for subset_mask in range(1, 1 << q):
+        subset_indices = [i for i in range(q) if subset_mask & (1 << i)]
+        subset_min = Y_post[..., subset_indices, :].amin(dim=-2)
+        diff = subset_min.unsqueeze(-2) - non_dominated_box_lower_bounds
+        diff.clamp_(min=torch.tensor(_EPS, dtype=torch.float64), max=non_dominated_box_intervals)
+        log_term = torch.special.logsumexp(diff.log().sum(dim=-1), dim=(-2, -1))
+        if len(subset_indices) % 2 == 1:
+            total = torch.logaddexp(total, log_term)
+        else:
+            total = total + torch.log1p(-torch.exp(log_term - total))
+
+    return total - log_n_qmc_samples
 
 
 def standard_logei(z: torch.Tensor) -> torch.Tensor:
@@ -342,16 +378,6 @@ class LogEHVI(BaseAcquisitionFunc):
         normalized_params_of_running_trials: np.ndarray | None = None,
         stabilizing_noise: float = 1e-12,
     ) -> None:
-        def _get_non_dominated_box_bounds() -> tuple[torch.Tensor, torch.Tensor]:
-            # NOTE(nabenabe): Y is to be maximized, loss_vals is to be minimized.
-            loss_vals = -Y_train.numpy()
-            pareto_sols = loss_vals[_is_pareto_front(loss_vals, assume_unique_lexsorted=False)]
-            ref_point = np.max(loss_vals, axis=0)
-            ref_point = np.nextafter(np.maximum(1.1 * ref_point, 0.9 * ref_point), np.inf)
-            lbs, ubs = get_non_dominated_box_bounds(pareto_sols, ref_point)
-            # NOTE(nabenabe): Flip back the sign to make them compatible with maximization.
-            return torch.from_numpy(-ubs), torch.from_numpy(-lbs)
-
         self._stabilizing_noise = stabilizing_noise
         self._gpr_list = gpr_list
         if normalized_params_of_running_trials is not None:
@@ -377,7 +403,7 @@ class LogEHVI(BaseAcquisitionFunc):
             dim=Y_train.shape[-1], n_samples=n_qmc_samples, seed=qmc_seed
         )
         self._non_dominated_box_lower_bounds, non_dominated_box_upper_bounds = (
-            _get_non_dominated_box_bounds()
+            _get_non_dominated_box_bounds_for_maximization(Y_train)
         )
         self._non_dominated_box_intervals = (
             non_dominated_box_upper_bounds - self._non_dominated_box_lower_bounds
@@ -403,6 +429,58 @@ class LogEHVI(BaseAcquisitionFunc):
         # L = torch.linalg.cholesky(cov)
         # Y_post = means[..., None, :] + torch.einsum("...MM,SM->...SM", L, fixed_samples)
         return logehvi(
+            Y_post=torch.stack(Y_post, dim=-1),
+            non_dominated_box_lower_bounds=self._non_dominated_box_lower_bounds,
+            non_dominated_box_intervals=self._non_dominated_box_intervals,
+        )
+
+
+class qLogEHVI(BaseAcquisitionFunc):
+    def __init__(
+        self,
+        gpr_list: list[GPRegressor],
+        search_space: SearchSpace,
+        Y_train: torch.Tensor,
+        n_qmc_samples: int,
+        qmc_seed: int | None,
+        normalized_params_of_running_trials: np.ndarray,
+        stabilizing_noise: float = 1e-12,
+    ) -> None:
+        self._stabilizing_noise = stabilizing_noise
+        self._gpr_list = gpr_list
+        self._X_running = torch.from_numpy(normalized_params_of_running_trials)
+        q = 1 + normalized_params_of_running_trials.shape[0]
+        self._fixed_samples = _sample_from_normal_sobol(
+            dim=Y_train.shape[-1] * q, n_samples=n_qmc_samples, seed=qmc_seed
+        ).reshape(n_qmc_samples, Y_train.shape[-1], q)
+        self._non_dominated_box_lower_bounds, non_dominated_box_upper_bounds = (
+            _get_non_dominated_box_bounds_for_maximization(Y_train)
+        )
+        self._non_dominated_box_intervals = (
+            non_dominated_box_upper_bounds - self._non_dominated_box_lower_bounds
+        ).clamp_min_(_EPS)
+        super().__init__(np.mean([gpr.length_scales for gpr in gpr_list], axis=0), search_space)
+
+    def _get_joint_input(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 1:
+            return torch.cat([self._X_running, x.unsqueeze(0)], dim=0)
+        if x.ndim == 2:
+            running = self._X_running.unsqueeze(0).expand(x.shape[0], -1, -1)
+            return torch.cat([running, x.unsqueeze(-2)], dim=-2)
+        raise ValueError(f"{x.ndim=} must be 1 or 2.")
+
+    def eval_acqf(self, x: torch.Tensor) -> torch.Tensor:
+        joint_x = self._get_joint_input(x)
+        Y_post = []
+        for i, gpr in enumerate(self._gpr_list):
+            mean, cov = gpr.posterior(joint_x, joint=True)
+            cov.diagonal(dim1=-2, dim2=-1).add_(self._stabilizing_noise)
+            samples = mean.unsqueeze(-2) + torch.matmul(
+                self._fixed_samples[:, i, :], torch.linalg.cholesky(cov).transpose(-1, -2)
+            )
+            Y_post.append(samples)
+
+        return qlogehvi(
             Y_post=torch.stack(Y_post, dim=-1),
             non_dominated_box_lower_bounds=self._non_dominated_box_lower_bounds,
             non_dominated_box_intervals=self._non_dominated_box_intervals,
