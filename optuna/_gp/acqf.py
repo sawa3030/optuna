@@ -416,13 +416,16 @@ class qLogEHVI(BaseAcquisitionFunc):
         normalized_params_of_running_trials: np.ndarray,
         stabilizing_noise: float = 1e-12,
     ) -> None:
-        self._stabilizing_noise = stabilizing_noise
-        self._gpr_list = gpr_list
-        self._X_running = torch.from_numpy(normalized_params_of_running_trials)
-        q = 1 + normalized_params_of_running_trials.shape[0]
-        self._fixed_samples = _sample_from_normal_sobol(
-            dim=Y_train.shape[-1] * q, n_samples=n_qmc_samples, seed=qmc_seed
-        ).reshape(n_qmc_samples, Y_train.shape[-1], q)
+        self._cond_gpr_list = [
+            ConditionalGPRegressor(
+                gpr=gpr,
+                X_running=torch.from_numpy(normalized_params_of_running_trials),
+                n_qmc_samples=n_qmc_samples,
+                qmc_seed=qmc_seed + i,
+                stabilizing_noise=stabilizing_noise,
+            )
+            for i, gpr in enumerate(gpr_list)
+        ]
         self._non_dominated_box_lower_bounds, non_dominated_box_upper_bounds = (
             _get_non_dominated_box_bounds_for_maximization(Y_train)
         )
@@ -431,27 +434,11 @@ class qLogEHVI(BaseAcquisitionFunc):
         ).clamp_min_(_EPS)
         super().__init__(np.mean([gpr.length_scales for gpr in gpr_list], axis=0), search_space)
 
-    def _get_joint_input(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim == 1:
-            return torch.cat([self._X_running, x.unsqueeze(0)], dim=0)
-        if x.ndim == 2:
-            running = self._X_running.unsqueeze(0).expand(x.shape[0], -1, -1)
-            return torch.cat([running, x.unsqueeze(-2)], dim=-2)
-        raise ValueError(f"{x.ndim=} must be 1 or 2.")
-
     def eval_acqf(self, x: torch.Tensor) -> torch.Tensor:
-        joint_x = self._get_joint_input(x)
-        Y_post = []
-        for i, gpr in enumerate(self._gpr_list):
-            mean, cov = gpr.posterior(joint_x, joint=True)
-            cov.diagonal(dim1=-2, dim2=-1).add_(self._stabilizing_noise)
-            samples = mean.unsqueeze(-2) + torch.matmul(
-                self._fixed_samples[:, i, :], torch.linalg.cholesky(cov).transpose(-1, -2)
-            )
-            Y_post.append(samples)
-
         return qlogehvi(
-            Y_post=torch.stack(Y_post, dim=-1),
+            Y_post=torch.stack(
+                [cond_gpr.sample_joint_posterior(x) for cond_gpr in self._cond_gpr_list], dim=-1
+            ),
             non_dominated_box_lower_bounds=self._non_dominated_box_lower_bounds,
             non_dominated_box_intervals=self._non_dominated_box_intervals,
         )
