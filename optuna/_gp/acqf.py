@@ -72,7 +72,7 @@ def qlogehvi(
 ) -> torch.Tensor:  # (..., )
     log_n_qmc_samples = float(np.log(Y_post.shape[-3]))
     q = Y_post.shape[-2]
-    total = torch.full(Y_post.shape[:-3], -torch.inf, dtype=torch.float64)
+    total = torch.full(Y_post.shape[:-3], -torch.inf)
 
     for subset_mask in range(1, 1 << q):
         subset_indices = [i for i in range(q) if subset_mask & (1 << i)]

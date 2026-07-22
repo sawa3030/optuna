@@ -453,7 +453,7 @@ class GPSampler(BaseSampler):
                         gpr_list=gprs_list,
                         search_space=internal_search_space,
                         Y_train=torch.from_numpy(standardized_score_vals),
-                        n_qmc_samples=128 * 16,
+                        n_qmc_samples=128,
                         qmc_seed=self._rng.rng.randint(1 << 30),
                         normalized_params_of_running_trials=normalized_params_of_running_trials,
                     )
