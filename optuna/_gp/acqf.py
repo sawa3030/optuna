@@ -482,23 +482,15 @@ class qLogEHVI(BaseAcquisitionFunc):
             )
             for i, gpr in enumerate(gpr_list)
         ]
-        lower_bounds_list = []
-        box_intervals_list = []
+        self._non_dominated_box_bounds_per_fantasy = []
         for fantasy in torch.stack(
             [cond_gpr.get_fantasy_samples() for cond_gpr in self._cond_gpr_list], dim=-1
         ):
             Y_fantasy = torch.cat([self._Y_train, fantasy], dim=0)
             lower_bounds, upper_bounds = _get_non_dominated_box_bounds(Y_fantasy)
-            lower_bounds_list.append(lower_bounds)
-            box_intervals_list.append((upper_bounds - lower_bounds).clamp_min_(_EPS))
-        self._non_dominated_box_lower_bounds = torch.nn.utils.rnn.pad_sequence(
-            lower_bounds_list, batch_first=True
-        )
-        self._non_dominated_box_intervals = torch.nn.utils.rnn.pad_sequence(
-            box_intervals_list,
-            batch_first=True,
-            padding_value=_EPS,
-        )
+            self._non_dominated_box_bounds_per_fantasy.append(
+                (lower_bounds, (upper_bounds - lower_bounds).clamp_min_(_EPS))
+            )
         super().__init__(np.mean([gpr.length_scales for gpr in gpr_list], axis=0), search_space)
 
     def compute_per_sample_log_utility(self, x: torch.Tensor) -> torch.Tensor:
@@ -509,11 +501,22 @@ class qLogEHVI(BaseAcquisitionFunc):
             ],
             dim=-1,
         )
-        return per_sample_log_hvi(
-            Y_post=Y_candidate_post,
-            non_dominated_box_lower_bounds=self._non_dominated_box_lower_bounds,
-            non_dominated_box_intervals=self._non_dominated_box_intervals,
-        )
+        # The number of non-dominated boxes depends on the fantasy sample. We therefore avoid
+        # padding across fantasies and compute each sample with its own valid boxes only.
+        per_sample_log_util_vals = []
+        for i, (
+            non_dominated_box_lower_bounds,
+            non_dominated_box_intervals,
+        ) in enumerate(self._non_dominated_box_bounds_per_fantasy):
+            diff = Y_candidate_post[..., i, :].unsqueeze(-2) - non_dominated_box_lower_bounds
+            diff.clamp_(
+                min=torch.tensor(_EPS, dtype=torch.float64),
+                max=non_dominated_box_intervals,
+            )
+            per_sample_log_util_vals.append(
+                torch.special.logsumexp(diff.log().sum(dim=-1), dim=-1)
+            )
+        return torch.stack(per_sample_log_util_vals, dim=-1)
 
     def eval_acqf(self, x: torch.Tensor) -> torch.Tensor:
         log_util_vals = self.compute_per_sample_log_utility(x)
